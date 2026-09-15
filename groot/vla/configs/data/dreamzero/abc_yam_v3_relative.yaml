@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /data/dreamzero/yam_relative
+  - _self_
+
+abc_metadata_root: ???
+yam_data_root: ${abc_metadata_root}
+max_chunk_size: 4
+mixture_dataset_cls: groot.vla.data.dataset.lerobot_v3.ABCV3MixtureDataset.from_mixture_spec
+single_dataset_cls: groot.vla.data.dataset.lerobot_v3.ShardedLeRobotV3YAMDataset
+train_dataset:
+  dataset_kwargs:
+    numeric_cache_bytes: 134217728
+    video_cache_bytes: 33554432
+    max_video_readers: 3
+    num_steps_per_shard: 10000

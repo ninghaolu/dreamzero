@@ -3,6 +3,7 @@ import logging
 import time
 from typing import TypeAlias, cast
 import os
+from groot.vla.model.dreamzero.action_loss import masked_action_mse
 
 from accelerate import load_checkpoint_and_dispatch
 
@@ -389,6 +390,8 @@ class WANPolicyHead(ActionHead):
         """
         if self.train_architecture == "lora":
             print("Injecting LoRA after loading pretrained weights")
+            if hasattr(self.model, "peft_config"):
+                raise RuntimeError("LoRA has already been injected")
             for p in self.parameters():
                 p.requires_grad = False
             self.model = self.add_lora_to_model(
@@ -789,10 +792,9 @@ class WANPolicyHead(ActionHead):
             weighted_dynamics_loss = weight_dynamics.mean()
             
             if actions.numel() > 0:
-                action_loss_per_sample = torch.nn.functional.mse_loss(
-                    action_noise_pred.float(), training_target_action.float(), reduction='none'
-                ) * action_mask  # shape: [B, ...]
-                action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                action_loss_per_sample = masked_action_mse(
+                    action_noise_pred, training_target_action, action_mask, has_real_action
+                )
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)

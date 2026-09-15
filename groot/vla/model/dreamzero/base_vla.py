@@ -259,320 +259,49 @@ class VLA(PreTrainedModel):
 
     @classmethod
     def from_pretrained_for_tuning(
-        cls, 
-        pretrained_model_name_or_path: str,
-        config: VLAConfig = None,  # This config will now be USED
-        device_map: str = "auto",
-        dtype: torch.dtype = torch.bfloat16,
-        offload_state_dict: bool = True,
-        lora_weights_path: str | None = None,
+        cls, pretrained_model_name_or_path, config=None, device_map="auto",
+        dtype=torch.bfloat16, offload_state_dict=True, lora_weights_path=None,
     ):
+        from .checkpoint_utils import load_base_and_inject, load_weights
         if config is None:
-            raise ValueError(
-                "A `config` object must be provided to build the model structure."
-            )
-
-        import os
-        import json
-        import gc
-        from safetensors.torch import load_file
-
-        model = cls(config)
-
-        safetensors_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-        safetensors_index_path = os.path.join(pretrained_model_name_or_path, "model.safetensors.index.json")
-
-        if os.path.exists(safetensors_index_path):
-            with open(safetensors_index_path, 'r') as f:
-                index = json.load(f)
-            missing_keys_accum = set()
-            unexpected_keys_accum = set()
-            shard_files = sorted(set(index["weight_map"].values()))
-            for shard_file in shard_files:
-                shard_path = os.path.join(pretrained_model_name_or_path, shard_file)
-                print(f"Loading shard: {shard_path}")
-                shard_state_dict = load_file(shard_path)
-                missing_keys, unexpected_keys = model.load_state_dict(shard_state_dict, strict=False)
-                if missing_keys:
-                    missing_keys_accum.update(missing_keys)
-                if unexpected_keys:
-                    unexpected_keys_accum.update(unexpected_keys)
-                # Free shard immediately
-                del shard_state_dict
-                gc.collect()
-            if missing_keys_accum:
-                print(f"Missing keys when loading sharded pretrained weights: {sorted(missing_keys_accum)} ... total={len(missing_keys_accum)}")
-            if unexpected_keys_accum:
-                print(f"Unexpected keys when loading sharded pretrained weights: {sorted(unexpected_keys_accum)} ... total={len(unexpected_keys_accum)}")
-            if not missing_keys_accum and not unexpected_keys_accum:
-                print("Successfully loaded pretrained base weights (sharded)")
-        elif os.path.exists(safetensors_path):
-            # Handle single safetensors file
-            print(f"Loading weights from safetensors: {safetensors_path}")
-            state_dict = load_file(safetensors_path)
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-            if missing_keys:
-                print(f"Missing keys when loading pretrained weights: {missing_keys}")
-            if unexpected_keys:
-                print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
-            if not missing_keys and not unexpected_keys:
-                print("Successfully loaded pretrained base weights")
-        else:
-            raise FileNotFoundError(
-                f"No weights found at '{pretrained_model_name_or_path}'. "
-                "Expected 'model.safetensors' or 'model.safetensors.index.json'."
-            )
-
+            raise ValueError("A configuration is required for tuning")
+        inner = config.action_head_cfg.get("config", config.action_head_cfg)
+        inner.update(defer_lora_injection=True, skip_component_loading=True)
+        model = load_base_and_inject(cls(config), pretrained_model_name_or_path)
         if lora_weights_path is not None:
-            print(f"Loading LoRA weights from: {lora_weights_path}")
-            model.load_lora_weight(lora_weights_path)
-        else:
-            if hasattr(model, 'action_head') and hasattr(model.action_head, 'inject_lora_after_loading') and model.action_head.config.defer_lora_injection:
-                print("Injecting LoRA adapters into action_head after loading pretrained weights")
-                model.action_head.inject_lora_after_loading()
-        
-        print(f"{cls}\n")
+            load_weights(model, lora_weights_path, trainable_only=True)
         return model
 
     @classmethod
-    def load_lora(
-        cls, 
-        pretrained_model_name_or_path: str
-    ): 
-        from safetensors.torch import load_file
-        import os
+    def load_lora(cls, pretrained_model_name_or_path, config=None, base_path=None):
         import json
-        print("loading lora@@@@@")
+        from pathlib import Path
+        from .checkpoint_utils import reconstruct_adapter
+        if config is None:
+            config = VLAConfig(**json.loads((Path(pretrained_model_name_or_path)/"config.json").read_text()))
+        return reconstruct_adapter(cls, config, pretrained_model_name_or_path, base_path)
 
-        # Check for different checkpoint formats
-        safetensors_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-        safetensors_index_path = os.path.join(pretrained_model_name_or_path, "model.safetensors.index.json")
-        
-        state_dict = {}
-        if os.path.exists(safetensors_index_path):
-            # Handle sharded safetensors
-            print(f"Loading sharded safetensors using index: {safetensors_index_path}")
-            
-            with open(safetensors_index_path, 'r') as f:
-                index = json.load(f)
-            
-            # Load each shard
-            for shard_file in set(index["weight_map"].values()):
-                shard_path = os.path.join(pretrained_model_name_or_path, shard_file)
-                print(f"Loading shard: {shard_path}")
-                shard_state_dict = load_file(shard_path)
-                state_dict.update(shard_state_dict)
-                
-        elif os.path.exists(safetensors_path):
-            # Handle single safetensors file
-            print(f"Loading weights from safetensors: {safetensors_path}")
-            state_dict.update(load_file(safetensors_path))
-        
-        # Load config
-        print("loading config@@")
-        config_path = os.path.join(pretrained_model_name_or_path, "config.json")
-        with open(config_path, "r") as f:
-            config_dict = json.load(f)
-        config = VLAConfig(**config_dict)
-        print("loading model")
-
-        # Disable defer_lora_injection so LoRA layers are created during init,
-        # matching the PEFT key hierarchy (base_model.model.*) in the checkpoint.
-        ah_cfg = config.action_head_cfg
-        inner = ah_cfg.get('config', ah_cfg) if isinstance(ah_cfg.get('config'), dict) else ah_cfg
-        if 'defer_lora_injection' in inner:
-            inner['defer_lora_injection'] = False
-            print("defer_lora_injection disabled for load_lora")
-        # Enable component loading so DiT base weights are loaded from pretrained
-        if 'skip_component_loading' in inner:
-            inner['skip_component_loading'] = False
-            print("skip_component_loading disabled for load_lora")
-
-        # Instantiate model (LoRA layers now exist from init)
-        model = cls(config)
-
-        # Remove .base_layer from keys if present
-        has_base_layer = any(".base_layer." in key for key in state_dict.keys())
-        if has_base_layer:
-            print("Removing '.base_layer' from state dict keys")
-            state_dict = {k.replace(".base_layer.", "."): v for k, v in state_dict.items()}
-
-        # Load weights
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-            
-        if missing_keys:
-            print(f"Missing keys when loading pretrained weights: {missing_keys}")
-        if unexpected_keys:
-            print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
-        
-        print("Successfully loaded pretrained weights")
-
-        print(f"{cls}\n")
-        return model
-
-    def load_lora_weight(self, pretrained_model_name_or_path: str):
-        """Load only LoRA weights from a pretrained model without loading config."""
-        from safetensors.torch import load_file
-        import os
-        import json
-        
-        print(f"Loading LoRA weights from {pretrained_model_name_or_path}")
-        
-        # Check for different checkpoint formats
-        safetensors_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-        safetensors_index_path = os.path.join(pretrained_model_name_or_path, "model.safetensors.index.json")
-
-        state_dict = {}
-        if os.path.exists(safetensors_index_path):
-            # Handle sharded safetensors
-            print(f"Loading sharded safetensors using index: {safetensors_index_path}")
-            
-            with open(safetensors_index_path, 'r') as f:
-                index = json.load(f)
-            
-            # Load each shard
-            for shard_file in set(index["weight_map"].values()):
-                shard_path = os.path.join(pretrained_model_name_or_path, shard_file)
-                print(f"Loading shard: {shard_path}")
-                shard_state_dict = load_file(shard_path)
-                state_dict.update(shard_state_dict)
-                
-        elif os.path.exists(safetensors_path):
-            # Handle single safetensors file
-            print(f"Loading weights from safetensors: {safetensors_path}")
-            state_dict.update(load_file(safetensors_path))
-        else:
-            raise FileNotFoundError(f"No valid checkpoint found at {pretrained_model_name_or_path}")
-        
-        print("Loading LoRA weights into existing model")
-
-        def rewrite_lora_state_dict_keys(state_dict, pattern, repl):
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                new_k = k.replace(pattern, repl)
-                new_state_dict[new_k] = v
-            return new_state_dict
-
-        has_target_pattern = any("action_head.model.base_model.model" in key for key in state_dict.keys())
-        
-        if not has_target_pattern:
-            print("Rewriting LoRA state dict keys from 'action_head.model' to 'action_head.model.base_model.model'")
-            state_dict = rewrite_lora_state_dict_keys(
-                state_dict,
-                pattern="action_head.model",
-                repl="action_head.model.base_model.model",
-            )
-        else:
-            print("State dict already has 'action_head.model.base_model.model' pattern, skipping key rewrite")
-        
-        # Load only the weights into the existing model
-        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-        
-        print("Successfully loaded LoRA state dict")
-            
-        if missing_keys:
-            print(f"Missing keys when loading LoRA weights: {missing_keys}")
-        if unexpected_keys:
-            print(f"Unexpected keys when loading LoRA weights: {unexpected_keys}")
-        
-        print("Successfully loaded LoRA weights")
+    def load_lora_weight(self, pretrained_model_name_or_path):
+        from .checkpoint_utils import load_weights
+        return load_weights(self, pretrained_model_name_or_path, trainable_only=True)
 
     @classmethod
-    def from_config_with_lora_weights(
-        cls,
-        config: VLAConfig,
-        pretrained_model_path: str,
-    ):
-        """Create VLA model from config and then load LoRA weights from pretrained model."""
-        print(f"Creating VLA model from config and loading LoRA weights from {pretrained_model_path}")
-        
-        # 1. Create model from config (similar to vla.yaml)
-        model = cls(config)
-        print("Model created from config")
-        
-        # 2. Load LoRA weights into the created model
-        model.load_lora_weight(pretrained_model_path)
-        
-        return model
+    def from_config_with_lora_weights(cls, config, pretrained_model_path):
+        return cls.load_lora(pretrained_model_path, config=config)
 
     @classmethod
-    def from_pretrained(
-        cls, 
-        pretrained_model_name_or_path: str,
-        config: VLAConfig = None
-    ):
-        del config
-
-        from safetensors.torch import load_file
-        import os
+    def from_pretrained(cls, pretrained_model_name_or_path, config=None):
         import json
-        print("loading pretrained@@@@@")
-        # Check for different checkpoint formats
-        safetensors_path = os.path.join(pretrained_model_name_or_path, "model.safetensors")
-        safetensors_index_path = os.path.join(pretrained_model_name_or_path, "model.safetensors.index.json")
-
-        state_dict = {}
-        if os.path.exists(safetensors_index_path):
-            # Handle sharded safetensors
-            print(f"Loading sharded safetensors using index: {safetensors_index_path}")
-            
-            with open(safetensors_index_path, 'r') as f:
-                index = json.load(f)
-            
-            # Load each shard
-            for shard_file in set(index["weight_map"].values()):
-                shard_path = os.path.join(pretrained_model_name_or_path, shard_file)
-                print(f"Loading shard: {shard_path}")
-                shard_state_dict = load_file(shard_path)
-                state_dict.update(shard_state_dict)
-                
-        elif os.path.exists(safetensors_path):
-            # Handle single safetensors file
-            print(f"Loading weights from safetensors: {safetensors_path}")
-            state_dict.update(load_file(safetensors_path))
-        
-        # Load config
-        print("loading config@@")
-        config_path = os.path.join(pretrained_model_name_or_path, "config.json")
-        with open(config_path, "r") as f:
-            config_dict = json.load(f)
-        config = VLAConfig(**config_dict)
-        print("loading model")
-        print("config.action_head_cfg", config.action_head_cfg)
-        # Always disable defer_lora_injection
-        # config.action_head_cfg is a dict, and defer_lora_injection is nested in config.action_head_cfg['config']
-        if 'config' in config.action_head_cfg and isinstance(config.action_head_cfg['config'], dict):
-            if 'defer_lora_injection' in config.action_head_cfg['config']:
-                config.action_head_cfg['config']['defer_lora_injection'] = False
-                print("config.action_head_cfg['config']['defer_lora_injection'] disabled (set to False)")
-        elif 'defer_lora_injection' in config.action_head_cfg:
-            config.action_head_cfg['defer_lora_injection'] = False
-            print("config.action_head_cfg['defer_lora_injection'] disabled (set to False)")
-
-        # Instantiate model
-        model = cls(config)
-        print("model", model)
-        # Remove .base_layer from keys (e.g., 'action_head.model.base_model.model.blocks.19.self_attn.v.base_layer.bias' -> 'action_head.model.base_model.model.blocks.19.self_attn.v.bias')
-        has_base_layer = any(".base_layer." in key for key in state_dict.keys())
-        if has_base_layer:
-            print("Removing '.base_layer' from state dict keys")
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                new_k = k.replace(".base_layer.", ".")
-                new_state_dict[new_k] = v
-            state_dict = new_state_dict
-
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-            
-        if missing_keys:
-            print(f"Missing keys when loading pretrained weights: {missing_keys}")
-        if unexpected_keys:
-            print(f"Unexpected keys when loading pretrained weights: {unexpected_keys}")
-        
-        print("Successfully loaded pretrained weights")
-
-        print(f"{cls}\n")
-        return model
+        from pathlib import Path
+        from .checkpoint_utils import load_base_and_inject
+        root = Path(pretrained_model_name_or_path)
+        if (root / "checkpoint_manifest.json").exists():
+            return cls.load_lora(root, config=config)
+        if config is None:
+            config = VLAConfig(**json.loads((root/"config.json").read_text()))
+        inner = config.action_head_cfg.get("config", config.action_head_cfg)
+        inner.update(defer_lora_injection=True, skip_component_loading=True)
+        return load_base_and_inject(cls(config), root)
 
     def post_initialize(self):
         self.action_head.post_initialize()

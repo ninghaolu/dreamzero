@@ -479,7 +479,9 @@ class BaseTrainer(transformers.Trainer):
 
         return self.optimizer
 
-    def save_model(self, output_dir: Optional[str], _internal_call: bool):
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+
+        output_dir = output_dir or self.args.output_dir
 
         ## save tuned model separately
         if self.is_deepspeed_enabled:
@@ -490,11 +492,14 @@ class BaseTrainer(transformers.Trainer):
         if self.base_cfg.save_lora_only:
             # Save only the trainable parameters
             train_key = [k for k, v in self.model.named_parameters() if v.requires_grad]
-            lora_state_dict = {k: v for k, v in self.model.state_dict().items() if k in train_key}
+            lora_state_dict = {k: v for k, v in state_dict.items() if k in train_key}
             state_dict = lora_state_dict
 
         if self.args.should_save:
             ret = self.model.save_pretrained(output_dir, state_dict=state_dict)
+            if self.base_cfg.save_lora_only:
+                from groot.vla.model.dreamzero.checkpoint_utils import write_checkpoint_manifest
+                write_checkpoint_manifest(self.model, output_dir, self.base_cfg.get("abc_metadata_root"))
 
             # can separately save the VLM model for downstream evalualtion
             if self.base_cfg.save_llm:
@@ -578,6 +583,10 @@ class BaseTrainer(transformers.Trainer):
         # persistent_workers is only valid when num_workers > 0 (PyTorch raises otherwise)
         if self.args.dataloader_num_workers > 0:
             dataloader_params["persistent_workers"] = self.args.dataloader_persistent_workers
+            from groot.vla.data.dataset.lerobot_v3 import ABCV3MixtureDataset
+            if isinstance(train_dataset, ABCV3MixtureDataset):
+                # Never fork decoder/CUDA/distributed runtime threads into ABC workers.
+                dataloader_params["multiprocessing_context"] = "spawn"
 
         return DataLoader(train_dataset, **dataloader_params)
 
@@ -701,39 +710,8 @@ class BaseExperiment(ABC):
         model = instantiate(cfg.model)
 
         if cfg.pretrained_model_path is not None:
-            mprint(f"Loading pretrained weights from: {cfg.pretrained_model_path}")
-            import json, gc
-            from safetensors.torch import load_file
-
-            ckpt_dir = cfg.pretrained_model_path
-            safetensors_index_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
-            safetensors_path = os.path.join(ckpt_dir, "model.safetensors")
-
-            if os.path.exists(safetensors_index_path):
-                with open(safetensors_index_path, 'r') as f:
-                    index = json.load(f)
-                for shard_file in sorted(set(index["weight_map"].values())):
-                    shard_path = os.path.join(ckpt_dir, shard_file)
-                    mprint(f"Loading shard: {shard_path}")
-                    shard_state_dict = load_file(shard_path)
-                    model.load_state_dict(shard_state_dict, strict=False)
-                    del shard_state_dict
-                    gc.collect()
-            elif os.path.exists(safetensors_path):
-                state_dict = load_file(safetensors_path)
-                model.load_state_dict(state_dict, strict=False)
-            else:
-                raise FileNotFoundError(
-                    f"No weights found at '{ckpt_dir}'. "
-                    "Expected 'model.safetensors' or 'model.safetensors.index.json'."
-                )
-
-            if (hasattr(model, 'action_head')
-                    and hasattr(model.action_head, 'inject_lora_after_loading')
-                    and model.action_head.config.defer_lora_injection):
-                model.action_head.inject_lora_after_loading()
-
-            mprint("Successfully loaded pretrained weights")
+            from groot.vla.model.dreamzero.checkpoint_utils import load_base_and_inject
+            load_base_and_inject(model, cfg.pretrained_model_path)
 
         model.config.resume_path = model.config._name_or_path = training_args.output_dir
         mprint(f"{model}\n")
@@ -792,6 +770,9 @@ class BaseExperiment(ABC):
         # Fully instantiate the trainer with dataclasses instances.
         trainer = trainer_partial(data_collator=data_collator, args=training_args)
         trainer.base_cfg = cfg
+        if cfg.get("abc_metadata_root"):
+            from groot.vla.experiment.abc_metrics import ABCTrainingMetrics
+            trainer.add_callback(ABCTrainingMetrics())
         train_dl_len = len(trainer.get_train_dataloader())
         eval_dl_len = (
             len(trainer.get_eval_dataloader()) if val_dataset is not None else "no eval dataloader"
