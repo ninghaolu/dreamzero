@@ -2,14 +2,16 @@
 # CPU-only pass1 -> reduce-pass1 -> pass2 -> finalize. Reruns reuse compatible parts.
 # --dry-run prints the four submissions without submitting jobs.
 set -euo pipefail
-ROOT=/projects/work/yang-lab/projects/policy-finetuning
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export ABC_DZ_REPO_ROOT="${ROOT}"
 WORKER="${ROOT}/slurm/compute_abc_yam_dreamzero_stats.bash"
-PYTHON=/scratch/nl2752/miniconda3/envs/dreamzero/bin/python
-SCRIPT="${ROOT}/dreamzero/scripts/data/compute_abc_yam_stats.py"
-export ABC_DZ_STATS_DATASET_ROOT="${ABC_DZ_STATS_DATASET_ROOT:-/projects/work/yang-lab/projects/pretrain_world_model/abc_130k_v3_train}"
-export ABC_DZ_STATS_OUTPUT_DIR="${ABC_DZ_STATS_OUTPUT_DIR:-${ROOT}/dreamzero/data/abc_yam_v3_norm_stats}"
-export ABC_DZ_STATS_WORK_DIR="${ABC_DZ_STATS_WORK_DIR:-${ROOT}/policy-finetuning-logs/dreamzero-abc-stats/work}"
-LOG_DIR="${ABC_DZ_STATS_LOG_DIR:-${ROOT}/policy-finetuning-logs/dreamzero-abc-stats}"
+export ABC_DZ_STATS_PYTHON="${ABC_DZ_STATS_PYTHON:-${ROOT}/.venv/bin/python}"
+PYTHON="${ABC_DZ_STATS_PYTHON}"
+SCRIPT="${ROOT}/scripts/data/compute_abc_yam_stats.py"
+export ABC_DZ_STATS_DATASET_ROOT="${ABC_DZ_STATS_DATASET_ROOT:-/projects/data/datasets/abc_130k_v3_train}"
+export ABC_DZ_STATS_OUTPUT_DIR="${ABC_DZ_STATS_OUTPUT_DIR:-${ROOT}/data/abc_yam_v3_norm_stats}"
+export ABC_DZ_STATS_WORK_DIR="${ABC_DZ_STATS_WORK_DIR:-${ROOT}/logs/abc-stats/work}"
+LOG_DIR="${ABC_DZ_STATS_LOG_DIR:-${ROOT}/logs/abc-stats}"
 CONCURRENT="${ABC_DZ_STATS_MAX_CONCURRENT:-32}"
 DRY_RUN=0
 if [[ "${1:-}" == --dry-run ]]; then DRY_RUN=1; shift; fi
@@ -22,7 +24,7 @@ if [[ ! "${CONCURRENT}" =~ ^[1-9][0-9]*$ || ! "${ABC_DZ_STATS_NUM_SHARDS}" =~ ^[
     echo "Invalid concurrency or shard count (files=${FILES})" >&2; exit 2
 fi
 mkdir -p "${LOG_DIR}"
-COMMON=(--parsable --output="${LOG_DIR}/stats-%A_%a.out" --error="${LOG_DIR}/stats-%A_%a.err")
+COMMON=(--parsable --chdir="${ROOT}" --output="${LOG_DIR}/stats-%A_%a.out" --error="${LOG_DIR}/stats-%A_%a.err")
 # Optional site-specific CPU partition; otherwise use the cluster default.
 if [[ -n "${ABC_DZ_STATS_PARTITION:-}" ]]; then COMMON+=(--partition="${ABC_DZ_STATS_PARTITION}"); fi
 ARRAY="0-$((ABC_DZ_STATS_NUM_SHARDS-1))%${CONCURRENT}"

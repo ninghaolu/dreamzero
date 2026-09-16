@@ -80,7 +80,8 @@ dependencies = [
     "openpi-client==0.1.1",
     "huggingface_hub",
     "decord2",
-    "deepspeed",
+    # 0.19.6 introduces an import cycle with the pinned Transformers 4.51.3.
+    "deepspeed==0.16.9",
     "tiktoken",
     "sentencepiece"
 ]

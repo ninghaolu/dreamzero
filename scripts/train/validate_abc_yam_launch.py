@@ -14,6 +14,8 @@ def main():
     args=sys.argv[1:]
     config_only=args and args[0]=="--config-only"
     if config_only:args=args[1:]
+    check_only=args and args[0]=="--check-only"
+    if check_only:args=args[1:]
     with initialize_config_dir(version_base="1.3",config_dir=str(ROOT/"groot/vla/configs")):
         cfg=compose(config_name="conf",overrides=args)
     if config_only:
@@ -33,9 +35,10 @@ def main():
     index=json.loads((Path(cfg.pretrained_model_path)/"model.safetensors.index.json").read_text())
     for shard in set(index["weight_map"].values()):
         if not (Path(cfg.pretrained_model_path)/shard).is_file():raise FileNotFoundError(shard)
-    output=Path(cfg.output_dir);output.mkdir(parents=True,exist_ok=True)
-    OmegaConf.save(cfg,output/"abc_resolved_config.yaml",resolve=True)
-    (output/"abc_launch_overrides.json").write_text(json.dumps(args,indent=2)+"\n")
+    if not check_only:
+        output=Path(cfg.output_dir);output.mkdir(parents=True,exist_ok=True)
+        OmegaConf.save(cfg,output/"abc_resolved_config.yaml",resolve=True)
+        (output/"abc_launch_overrides.json").write_text(json.dumps(args,indent=2)+"\n")
     print(f"ABC preflight passed: {storage.manifest['valid_windows']} eligible windows",flush=True)
 
 
