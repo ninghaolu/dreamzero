@@ -27,6 +27,7 @@ def main():
     from PIL import Image
     from torch.utils.data import DataLoader
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--temporal", choices=["h24", "h48"], default=os.environ.get("ABC_TEMPORAL", "h48"))
     parser.add_argument("--metadata-root",required=True)
     parser.add_argument("--output-dir",type=Path,required=True)
     parser.add_argument("--episode-ids",type=int,nargs="+",default=[0,1])
@@ -39,10 +40,12 @@ def main():
         args.output_dir=args.output_dir/f"rank-{torch.distributed.get_rank()}"
     random.seed(42);np.random.seed(42);torch.manual_seed(42);torch.set_num_threads(1)
     cfg=compose_abc(args.metadata_root,["++train_dataset.mixture_kwargs.num_shards_to_sample=16",
-                                       "train_dataset.mixture_kwargs.shard_sampling_rate=0.0001"])
+                                       "train_dataset.mixture_kwargs.shard_sampling_rate=0.0001"], temporal=args.temporal)
     begun=time.monotonic()
     mixture=instantiate(cfg.train_dataset)
     dataset=mixture.datasets[0]
+    temporal = dataset.temporal
+    endpoint = temporal.endpoint
     collator=instantiate(cfg.data_collator)
     args.output_dir.mkdir(parents=True,exist_ok=True)
     report={"initialization_seconds":time.monotonic()-begun,"episodes":[],"valid_windows":len(dataset)}
@@ -54,7 +57,7 @@ def main():
         begun=time.monotonic()
         raw=dataset.raw_sample(ep,start)
         item=dataset.transforms(copy.deepcopy(raw))
-        expected={"images":(33,352,640,3),"state":(4,64),"action":(96,32)}
+        expected={"images":(33,352,640,3),"state":(4,64),"action":(endpoint,32)}
         for key,shape in expected.items():
             if tuple(item[key].shape)!=shape:raise ValueError(f"{key}: {item[key].shape} != {shape}")
         for key in ["state_mask","action_mask"]:
@@ -63,10 +66,23 @@ def main():
         detail=dict(episode=ep,start=start,task=raw["annotation.task"][0],seconds=time.monotonic()-begun,
                     shapes={key:list(item[key].shape) for key in expected},cameras={})
         rows=dataset.storage.read_episode(ep)
+        from groot.vla.data.dataset.yam_temporal import YAMTemporalPlan
+        from groot.vla.data.dataset.abc_v3_storage import SLICES
+        plan = YAMTemporalPlan(start, temporal).validate(len(rows["index"]), rows["task_index"])
+        local_times = rows["timestamp"][plan.video_indices]
+        np.testing.assert_allclose(np.diff(local_times), 1/temporal.video_fps, atol=1e-4)
+        np.testing.assert_allclose(local_times[-1]-local_times[0], endpoint/30, atol=1e-4)
+        for key, (a, b) in SLICES.items():
+            expected_relative = np.concatenate([
+                rows["action"][anchor:anchor+temporal.block_length, a:b] - rows["observation.state"][anchor, a:b]
+                for anchor in plan.state_indices])
+            np.testing.assert_array_equal(raw[f"action.{key}"], expected_relative)
+        detail.update(video_indices=plan.video_indices.tolist(), action_indices=plan.action_indices.tolist(),
+                      state_indices=plan.state_indices.tolist(), video_timestamps=local_times.tolist())
         # Compare the first/last requested frame with an independent seek/decode.
         from groot.vla.data.dataset.abc_v3_storage import CAMERAS
         for camera in CAMERAS:
-            requested_indices=np.array([start,start+96])
+            requested_indices=np.array([start,start+endpoint])
             path,timestamps,interval=dataset.storage.camera_request(ep,camera,rows["timestamp"][requested_indices])
             errors=[]
             for sample_pos,requested in zip([0,-1],timestamps):
@@ -89,7 +105,7 @@ def main():
         report["episodes"].append(detail)
     for batch_size in [1,4]:
         batch=collator([samples[i%len(samples)] for i in range(batch_size)])
-        if tuple(batch["action"].shape)!=(batch_size,96,32):raise ValueError("Invalid batch action shape")
+        if tuple(batch["action"].shape)!=(batch_size,endpoint,32):raise ValueError("Invalid batch action shape")
     positions=[set(mixture.schedule_positions(rank,2,worker,2)) for rank in range(2) for worker in range(2)]
     if set.union(*positions)!=set(range(16)) or sum(map(len,positions))!=16:
         raise ValueError("Schedule partition mismatch")
@@ -101,14 +117,14 @@ def main():
     iterator=iter(loader)
     for _ in range(args.samples):
         batch=next(iterator)
-        if tuple(batch["action"].shape)!=(1,96,32):raise ValueError("Worker batch shape mismatch")
+        if tuple(batch["action"].shape)!=(1,endpoint,32):raise ValueError("Worker batch shape mismatch")
     # Drain this deliberately tiny schedule so workers finish decoding before teardown.
     # Abruptly stopping a long prefetch stream can abort native decoder threads on exit.
     if args.workers:
         for batch in iterator:
-            if tuple(batch["action"].shape)!=(1,96,32):raise ValueError("Worker batch shape mismatch")
+            if tuple(batch["action"].shape)!=(1,endpoint,32):raise ValueError("Worker batch shape mismatch")
     del iterator,loader
-    report.update(worker_count=args.workers,iterated_samples=args.samples,
+    report.update(temporal=temporal.to_dict(), worker_count=args.workers,iterated_samples=args.samples,
                   iteration_seconds=time.monotonic()-begun,numeric_cache_bytes=dataset.storage.cached_bytes,
                   video_cache_bytes=dataset.video_reader.cached_bytes,
                   rank=mixture.rank,world_size=mixture.world_size,

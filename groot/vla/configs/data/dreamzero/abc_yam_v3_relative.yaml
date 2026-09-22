@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - /data/dreamzero/yam_relative
+  - /abc_temporal: h48
   - _self_
 
 abc_metadata_root: ???
@@ -10,7 +11,19 @@ mixture_dataset_cls: groot.vla.data.dataset.lerobot_v3.ABCV3MixtureDataset.from_
 single_dataset_cls: groot.vla.data.dataset.lerobot_v3.ShardedLeRobotV3YAMDataset
 train_dataset:
   dataset_kwargs:
+    action_horizon: ${action_horizon}
+    video_stride: ${abc_video_stride}
     numeric_cache_bytes: 134217728
     video_cache_bytes: 33554432
     max_video_readers: 3
     num_steps_per_shard: 10000
+
+# The ABC adapter samples these indices directly, without FPS conversion.
+modality_config_yam:
+  video:
+    delta_indices: ${abc_video_indices}
+  state:
+    delta_indices: ${abc_state_indices}
+    eval_delta_indices: [0]
+  action:
+    delta_indices: ${abc_action_indices}

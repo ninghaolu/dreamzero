@@ -71,7 +71,7 @@ dependencies = [
     "imageio==2.34.2",
     "imageio-ffmpeg",
     "wandb",
-    "opencv-python==4.8.0.74",
+    "opencv-python-headless==4.11.0.86",
     "diffusers==0.30.2",
     "ftfy",
     "nvidia-modelopt",

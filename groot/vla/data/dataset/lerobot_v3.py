@@ -6,7 +6,7 @@ import pandas as pd
 from torch.utils.data import get_worker_info
 
 from .abc_v3_storage import ABCV3Storage, CAMERAS, SLICES, verify_normalizer
-from .yam_temporal import YAMTemporalPlan, WindowRanges
+from .yam_temporal import TemporalConfig, YAMTemporalPlan, WindowRanges
 from .lerobot_v3_video import V3VideoReader
 from .lerobot import LeRobotSingleDataset
 from .lerobot_sharded import ShardedLeRobotMixtureDataset
@@ -54,10 +54,14 @@ class AllWindows(Sequence):
 class ShardedLeRobotV3YAMDataset(LeRobotSingleDataset):
     def __init__(self, dataset_path, *args, numeric_cache_bytes=128*1024**2,
                  video_cache_bytes=32*1024**2, max_video_readers=3,
-                 num_steps_per_shard=10000, source_root=None, **kwargs):
+                 num_steps_per_shard=10000, source_root=None,
+                 action_horizon=24, video_stride=3, **kwargs):
         print(f"Loading ABC v3 index: {dataset_path}", flush=True)
         self.storage = ABCV3Storage(dataset_path, numeric_cache_bytes, source_root)
-        verify_normalizer(dataset_path)
+        self.temporal = TemporalConfig(block_length=action_horizon, video_stride=video_stride)
+        if self.storage.temporal != self.temporal:
+            raise ValueError("Dataset temporal configuration differs from prepared metadata")
+        verify_normalizer(dataset_path, self.temporal)
         if kwargs.get("use_global_metadata", False) or kwargs.get("relative_action_per_horizon", False):
             raise ValueError("ABC requires local pooled relative normalization")
         if kwargs.get("max_chunk_size", 4) != 4:
@@ -113,7 +117,7 @@ class ShardedLeRobotV3YAMDataset(LeRobotSingleDataset):
         return {key: DatasetStatisticalValues.model_validate(values[key]) for key in SLICES}
 
     def _get_max_delta_index(self):
-        return 96
+        return self.temporal.endpoint
 
     def get_trajectory_data(self, trajectory_id):
         rows = self.storage.read_episode(trajectory_id)
@@ -121,7 +125,7 @@ class ShardedLeRobotV3YAMDataset(LeRobotSingleDataset):
 
     def raw_sample(self, trajectory_id, start, decode_video=True):
         rows = self.storage.read_episode(trajectory_id)
-        plan = YAMTemporalPlan(int(start)).validate(len(rows["index"]), rows["task_index"])
+        plan = YAMTemporalPlan(int(start), self.temporal).validate(len(rows["index"]), rows["task_index"])
         relative = plan.relative_actions(rows["observation.state"], rows["action"])
         data = {}
         for key, (a,b) in SLICES.items():

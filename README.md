@@ -25,6 +25,7 @@ DreamZero is a World Action Model that jointly predicts actions and videos, achi
 - Video generation and saving (MP4)
 - LoRA and full fine-tuning training scripts
 - Training on new embodiments (AgiBot, YAM) — see [guide](docs/DATASET_TO_GEAR_AND_TRAIN.md)
+- ABC-130K full finetuning at 5 FPS / 30 Hz (H48), or the original H24 setup — see [commands and temporal contract](docs/abc/FULL_FINETUNING.md)
 
 **Coming Soon**
 - [PolaRiS](https://polaris-evals.github.io/) simulation environment support

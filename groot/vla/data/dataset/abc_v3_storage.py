@@ -8,6 +8,11 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
+try:
+    from .yam_temporal import TemporalConfig
+except ImportError:
+    from yam_temporal import TemporalConfig
+
 CAMERAS = {"top_camera-images-rgb": "observation.images.top",
            "left_camera-images-rgb": "observation.images.left_wrist",
            "right_camera-images-rgb": "observation.images.right_wrist"}
@@ -19,10 +24,14 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def verify_normalizer(root):
+def verify_normalizer(root, temporal=None):
     root = Path(root)
     manifest = json.loads((root / "norm_stats_manifest.json").read_text())
-    expected = dict(block_length=24, num_blocks=4, action_dim=14, relative_grippers=True,
+    actual = TemporalConfig.from_manifest(manifest)
+    temporal = temporal or actual
+    if actual != temporal:
+        raise ValueError("Normalizer temporal configuration mismatch")
+    expected = dict(block_length=temporal.block_length, num_blocks=temporal.num_blocks, action_dim=14, relative_grippers=True,
                     all_source_files_used=True, population="all-valid-four-block-window-starts-uniform")
     if any(manifest.get(k) != v for k, v in expected.items()):
         raise ValueError("Incompatible or incomplete DreamZero normalizer")
@@ -47,6 +56,7 @@ class ABCV3Storage:
         for name, digest in self.manifest["files_sha256"].items():
             if sha256(self.metadata_root / name) != digest:
                 raise ValueError(f"Prepared metadata hash mismatch: {name}")
+        self.temporal = TemporalConfig.from_manifest(self.manifest)
         self.source_root = Path(source_root or self.manifest["source_root"])
         self.episodes = pq.read_table(self.metadata_root / "episodes.parquet").to_pandas().set_index("episode_index")
         self.row_groups = pq.read_table(self.metadata_root / "row_groups.parquet").to_pylist()

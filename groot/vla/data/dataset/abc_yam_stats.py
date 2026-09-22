@@ -1,7 +1,7 @@
 """CPU-only, streaming ABC v3 statistics for the four-block DreamZero recipe.
 
-Population: each complete, task-consistent 97-row window once, four blocks of
-24 relative actions per window. No boundary padding; all 14 dimensions relative.
+Population: each complete, task-consistent (H*M+1)-row window once, M blocks of
+H relative actions per window. No boundary padding; all 14 dimensions relative.
 Numeric files stay in place. State statistics come from source meta/stats.json.
 """
 from __future__ import annotations
@@ -18,9 +18,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-BLOCK = 24
-BLOCKS = 4
-ENDPOINT = BLOCK * BLOCKS
+try:
+    from .yam_temporal import TemporalConfig
+except ImportError:
+    from yam_temporal import TemporalConfig
+
+DEFAULT_TEMPORAL = TemporalConfig()
 DIM = 14
 SLICES = {"left_joint_pos": (0, 6), "left_gripper_pos": (6, 7),
           "right_joint_pos": (7, 13), "right_gripper_pos": (13, 14)}
@@ -36,6 +39,23 @@ def atomic_json(path, value):
         f.write("\n")
         tmp = f.name
     os.replace(tmp, path)
+
+
+def ensure_identity(path, identity):
+    """Publish once: replacing a shared manifest can cause NFS ESTALE in readers."""
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+        json.dump(identity, f, sort_keys=True, allow_nan=False)
+        tmp = f.name
+    try:
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+        if json.loads(path.read_text()) != identity:
+            raise ValueError("Work directory identity mismatch; use a fresh work directory")
+    finally:
+        os.unlink(tmp)
 
 
 def save_part(path, identity, **arrays):
@@ -60,7 +80,7 @@ def file_inventory(root):
     return files
 
 
-def source_identity(root, files, bins, shards):
+def source_identity(root, files, bins, shards, temporal=DEFAULT_TEMPORAL):
     # Metadata contents + file names/sizes/mtimes; deliberately not a payload hash.
     digest = hashlib.sha256()
     for name in ("meta/info.json", "meta/stats.json"):
@@ -72,7 +92,8 @@ def source_identity(root, files, bins, shards):
     return dict(schema_version=1, dataset_root=str(root.resolve()),
                 source_fingerprint=digest.hexdigest(), total_files=len(files),
                 fingerprint_method="metadata-content-and-data-path-size-mtime",
-                block_length=BLOCK, num_blocks=BLOCKS, action_dim=DIM,
+                block_length=temporal.block_length, num_blocks=temporal.num_blocks, action_dim=DIM,
+                temporal=temporal.to_dict(),
                 relative_grippers=True, population="all-valid-four-block-window-starts-uniform",
                 require_video_endpoint_row=True, boundary_policy="exclude-episode-or-task-crossing",
                 num_bins=bins, num_shards=shards)
@@ -117,8 +138,8 @@ def validate_rows(rows):
         raise ValueError("New episode does not start at frame zero")
 
 
-def owned_batches(files, file_index, batch_rows):
-    """Bounded batches with 96-row lookahead across row groups and files.
+def owned_batches(files, file_index, batch_rows, temporal=DEFAULT_TEMPORAL):
+    """Bounded batches with H*M-row lookahead across row groups and files.
 
     Every anchor belongs to exactly its starting data file, even across shards.
     Only the current file is consumed fully; following files supply lookahead.
@@ -132,35 +153,35 @@ def owned_batches(files, file_index, batch_rows):
             rows = arrays_from_batch(batch)
             buffer = rows if buffer is None else {k: np.concatenate([buffer[k], rows[k]]) for k in COLUMNS}
             validate_rows(buffer)
-            ready = min(remaining, len(buffer["index"]) - ENDPOINT)
+            ready = min(remaining, len(buffer["index"]) - temporal.endpoint)
             while ready > 0:
                 count = min(ready, batch_rows)
-                yield {k: v[:count + ENDPOINT] for k, v in buffer.items()}, count
+                yield {k: v[:count + temporal.endpoint] for k, v in buffer.items()}, count
                 buffer = {k: v[count:] for k, v in buffer.items()}
                 remaining -= count
                 if remaining == 0:
                     return
-                ready = min(remaining, len(buffer["index"]) - ENDPOINT)
+                ready = min(remaining, len(buffer["index"]) - temporal.endpoint)
     if remaining:
-        # At dataset end no complete window can begin in the last 96 rows.
+        # At dataset end no complete window can begin in the last H*M rows.
         yield buffer, remaining
 
 
-def valid_starts(rows, owned_count):
-    n = min(owned_count, max(0, len(rows["index"]) - ENDPOINT))
+def valid_starts(rows, owned_count, temporal=DEFAULT_TEMPORAL):
+    n = min(owned_count, max(0, len(rows["index"]) - temporal.endpoint))
     starts = np.arange(n)
     # Prefix counts detect any interior task change, including A -> B -> A.
     changes = ((np.diff(rows["episode_index"]) != 0) |
                (np.diff(rows["task_index"]) != 0))
     prefix = np.concatenate([[0], np.cumsum(changes)])
-    return starts[prefix[starts + ENDPOINT] == prefix[starts]]
+    return starts[prefix[starts + temporal.endpoint] == prefix[starts]]
 
 
-def action_batches(rows, starts):
-    for block_start in range(0, ENDPOINT, BLOCK):
+def action_batches(rows, starts, temporal=DEFAULT_TEMPORAL):
+    for block_start in range(0, temporal.endpoint, temporal.block_length):
         anchors = starts + block_start
         reference = rows["observation.state"][anchors]
-        for offset in range(BLOCK):
+        for offset in range(temporal.block_length):
             yield rows["action"][anchors + offset] - reference
 
 
@@ -226,6 +247,7 @@ def part_path(work, stage, shard):
 
 
 def run_map(args, files, identity):
+    temporal = TemporalConfig.from_name(args.temporal)
     shard = args.shard_index
     if not 0 <= shard < args.num_shards:
         raise ValueError("Invalid shard index")
@@ -240,11 +262,11 @@ def run_map(args, files, identity):
     hist = np.zeros((DIM, args.num_bins), dtype=np.int64)
     owned = windows = 0
     for file_index in range(shard, len(files), args.num_shards):
-        for rows, count in owned_batches(files, file_index, args.batch_rows):
-            starts = valid_starts(rows, count)
+        for rows, count in owned_batches(files, file_index, args.batch_rows, temporal):
+            starts = valid_starts(rows, count, temporal)
             owned += count
             windows += len(starts)
-            for values in action_batches(rows, starts):
+            for values in action_batches(rows, starts, temporal):
                 if bounds is None:
                     update_moments(acc, values)
                 else:
@@ -255,6 +277,7 @@ def run_map(args, files, identity):
 
 
 def run_reduce(args, files, identity):
+    temporal = TemporalConfig.from_name(args.temporal)
     stage = "pass1" if args.stage == "reduce-pass1" else "pass2"
     acc = empty_moments()
     hist = np.zeros((DIM, args.num_bins), dtype=np.int64)
@@ -264,11 +287,11 @@ def run_reduce(args, files, identity):
         owned += int(data["owned_rows"])
         windows += int(data["windows"])
         if stage == "pass1":
-            if int(data["count"]) != int(data["windows"]) * ENDPOINT:
+            if int(data["count"]) != int(data["windows"]) * temporal.endpoint:
                 raise ValueError("Partial action count mismatch")
             merge_moments(acc, data)
         else:
-            if not np.all(data["histogram"].sum(axis=1) == int(data["windows"]) * ENDPOINT):
+            if not np.all(data["histogram"].sum(axis=1) == int(data["windows"]) * temporal.endpoint):
                 raise ValueError("Partial histogram count mismatch")
             hist += data["histogram"]
     actual_rows = sum(pq.ParquetFile(p).metadata.num_rows for p in files)
@@ -317,6 +340,7 @@ def run_reduce(args, files, identity):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--temporal", choices=["h24", "h48"], default="h24")
     parser.add_argument("--stage", choices=["count-files", "pass1", "reduce-pass1", "pass2", "finalize"], required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)
@@ -346,7 +370,7 @@ def main(argv=None):
     info = json.loads((args.dataset_root / "meta/info.json").read_text())
     if info.get("codebase_version") != "v3.0" or info.get("fps") != 30:
         raise ValueError("Expected ABC LeRobot v3.0 at 30 FPS")
-    identity = source_identity(args.dataset_root, files, args.num_bins, args.num_shards)
+    identity = source_identity(args.dataset_root, files, args.num_bins, args.num_shards, TemporalConfig.from_name(args.temporal))
     identity["max_files"] = args.max_files
     output_manifest = args.output_dir / "norm_stats_manifest.json"
     if output_manifest.exists():
@@ -355,9 +379,7 @@ def main(argv=None):
             raise ValueError("Output directory identity mismatch; use a fresh output directory")
     args.work_dir.mkdir(parents=True, exist_ok=True)
     manifest = args.work_dir / "identity.json"
-    if manifest.exists() and json.loads(manifest.read_text()) != identity:
-        raise ValueError("Work directory identity mismatch; use a fresh work directory")
-    atomic_json(manifest, identity)
+    ensure_identity(manifest, identity)
     if args.stage in ("pass1", "pass2"):
         run_map(args, files, identity)
     else:

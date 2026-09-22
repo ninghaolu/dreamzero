@@ -11,23 +11,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "groot/vla/data/dataset"))
+from yam_temporal import TemporalConfig
 from abc_v3_storage import CAMERAS, SLICES, sha256, verify_normalizer
 from abc_yam_stats import atomic_json, file_inventory, source_identity
 
 
-def prepare(source, output, normalizer, pilot_episodes=0, seed=42, split="train", check_files=True):
+def prepare(source, output, normalizer, pilot_episodes=0, seed=42, split="train", check_files=True, temporal=None):
     source, output, normalizer = map(Path, (source, output, normalizer))
     if output.exists():
         raise FileExistsError(f"Use a fresh metadata directory: {output}")
     if source.resolve() == output.resolve() or source.resolve() in output.resolve().parents:
         raise ValueError("Write prepared metadata outside the source dataset")
-    norm = verify_normalizer(normalizer)
+    temporal = temporal or TemporalConfig()
+    norm = verify_normalizer(normalizer, temporal)
     info = json.loads((source / "meta/info.json").read_text())
     if info["codebase_version"] != "v3.0" or info["fps"] != 30:
         raise ValueError("Expected LeRobot v3.0 at 30 FPS")
     files = file_inventory(source)
     if split == "train":
-        identity = source_identity(source, files, norm["num_bins"], norm["num_shards"])
+        identity = source_identity(source, files, norm["num_bins"], norm["num_shards"], temporal)
         if identity["source_fingerprint"] != norm["source_fingerprint"]:
             raise ValueError("Training source differs from normalizer source")
     elif source.resolve() == Path(norm["dataset_root"]).resolve():
@@ -104,7 +106,7 @@ def prepare(source, output, normalizer, pilot_episodes=0, seed=42, split="train"
             print(f"indexed file {file_number+1}/{len(files)}", flush=True)
     if previous_index+1 != info["total_frames"] or any(observed[k] != lengths[k] for k in ids):
         raise ValueError("Source row coverage mismatch")
-    windows = [dict(segment, stop=segment["stop"]-96) for segment in segments if segment["stop"]-segment["start"] > 96]
+    windows = [dict(segment, stop=segment["stop"]-temporal.endpoint) for segment in segments if segment["stop"]-segment["start"] > temporal.endpoint]
     count = sum(s["stop"]-s["start"] for s in windows)
     if not count:
         raise ValueError("No valid four-block windows")
@@ -129,7 +131,7 @@ def prepare(source, output, normalizer, pilot_episodes=0, seed=42, split="train"
     shutil.copyfile(normalizer / "norm_stats_manifest.json", output / "norm_stats_manifest.json")
     names = ["episodes.parquet", "row_groups.parquet", "windows.parquet", "norm_stats_manifest.json"]
     names += [str(p.relative_to(output)) for p in meta.iterdir()]
-    manifest = dict(schema_version=1, source_root=str(source.resolve()), split=split, seed=seed,
+    manifest = dict(schema_version=1, temporal=temporal.to_dict(), source_root=str(source.resolve()), split=split, seed=seed,
                     episode_count=len(episodes), selected_episode_ids=sorted(ids),
                     valid_windows=count, selected_rows=int(episodes.length.sum()),
                     excluded_window_starts=int(episodes.length.sum())-count,
@@ -143,6 +145,7 @@ def prepare(source, output, normalizer, pilot_episodes=0, seed=42, split="train"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--temporal", choices=["h24", "h48"], default="h24")
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--normalizer-root", type=Path, required=True)
@@ -152,7 +155,7 @@ def main():
     args = parser.parse_args()
     if args.pilot_episodes < 0:
         parser.error("pilot episode count must be nonnegative")
-    prepare(args.source_root, args.output_root, args.normalizer_root, args.pilot_episodes, args.seed, args.split)
+    prepare(args.source_root, args.output_root, args.normalizer_root, args.pilot_episodes, args.seed, args.split, temporal=TemporalConfig.from_name(args.temporal))
 
 
 if __name__ == "__main__":

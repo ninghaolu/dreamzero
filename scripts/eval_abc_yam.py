@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed held-out ABC anchors: causal 24-step action errors and hold-state baseline."""
+"""Fixed held-out ABC anchors: causal configured-horizon action errors and hold-state baseline."""
 import argparse
 import json
 import os
@@ -12,7 +12,8 @@ import numpy as np
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"groot/vla/data/dataset"))
-from abc_v3_storage import ABCV3Storage, CAMERAS, SLICES, sha256
+from abc_v3_storage import ABCV3Storage, CAMERAS, SLICES, sha256, verify_normalizer
+from yam_temporal import TemporalConfig, YAMTemporalPlan
 from lerobot_v3_video import V3VideoReader
 
 
@@ -26,6 +27,7 @@ def metrics(predicted,target):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--temporal", choices=["h24", "h48"], help="Default: infer from prepared metadata")
     parser.add_argument("--metadata-root",required=True)
     parser.add_argument("--output-dir",required=True,type=Path)
     parser.add_argument("--anchors",type=Path)
@@ -36,6 +38,11 @@ def main():
     args=parser.parse_args()
     if args.num_samples<1:parser.error("num-samples must be positive")
     storage=ABCV3Storage(args.metadata_root)
+    temporal = storage.temporal
+    if args.temporal and temporal != TemporalConfig.from_name(args.temporal):
+        raise ValueError("Evaluation temporal configuration differs from metadata")
+    verify_normalizer(args.metadata_root, temporal)
+    horizon = temporal.block_length
     if storage.manifest["split"]!="validation":raise ValueError("Use separate validation-source metadata")
     args.output_dir.mkdir(parents=True,exist_ok=True)
     identity=sha256(Path(args.metadata_root)/"manifest.json")
@@ -59,6 +66,13 @@ def main():
         anchors_path.write_text(json.dumps(dict(metadata_sha256=identity,anchors=anchors),indent=2)+"\n")
     policy=None
     if args.checkpoint:
+        saved_config = json.loads((Path(args.checkpoint)/"config.json").read_text())
+        head_config = saved_config["action_head_cfg"]["config"]
+        if (saved_config["action_horizon"] != horizon or
+            head_config["diffusion_model_cfg"]["num_action_per_block"] != horizon or
+            head_config["diffusion_model_cfg"]["num_frame_per_block"] != temporal.num_frame_per_block or
+            head_config["num_frames"] != temporal.num_frames):
+            raise ValueError("Checkpoint temporal configuration differs from evaluation data")
         import torch
         import torch.distributed as dist
         from groot.vla.model.n1_5.sim_policy import GrootSimPolicy
@@ -75,11 +89,10 @@ def main():
     for anchor in anchors:
         ep,start=anchor["episode"],anchor["start"]
         rows=storage.read_episode(ep)
-        if start<0 or start+96>=len(rows["index"]) or np.any(rows["task_index"][start:start+97]!=rows["task_index"][start]):
-            raise ValueError("Saved anchor violates held-out window contract")
+        YAMTemporalPlan(start, temporal).validate(len(rows["index"]), rows["task_index"])
         state=rows["observation.state"][start]
-        target=rows["action"][start:start+24]
-        hold=np.repeat(state[None,:],24,axis=0)
+        target=rows["action"][start:start+horizon]
+        hold=np.repeat(state[None,:],horizon,axis=0)
         task=storage.tasks[int(rows["task_index"][start])]
         record=dict(anchor,task=task)
         if policy is not None:
@@ -103,9 +116,9 @@ def main():
             for key,(a,b) in SLICES.items():
                 value=result.act[f"action.{key}"]
                 if torch.is_tensor(value):value=value.detach().cpu().numpy()
-                values.append(np.asarray(value).reshape(-1,b-a)[:24])
+                values.append(np.asarray(value).reshape(-1,b-a)[:horizon])
             prediction=np.concatenate(values,axis=1)
-            if prediction.shape!=(24,14) or not np.isfinite(prediction).all():raise ValueError("Invalid predicted action chunk")
+            if prediction.shape!=(horizon,14) or not np.isfinite(prediction).all():raise ValueError("Invalid predicted action chunk")
             # Native policy.unapply already inverse-normalizes and adds the anchor state once.
             predictions.append(prediction)
             if len(predictions)<=8:
@@ -116,7 +129,7 @@ def main():
         targets.append(target);baseline.append(hold);tasks.append(task);records.append(record)
     target=np.asarray(targets);hold=np.asarray(baseline)
     report=dict(metadata_sha256=identity,checkpoint=args.checkpoint,num_anchors=len(anchors),
-                horizon=24,baseline=metrics(hold,target),per_task={},seconds=time.perf_counter()-begin,
+                horizon=horizon,temporal=temporal.to_dict(),baseline=metrics(hold,target),per_task={},seconds=time.perf_counter()-begin,
                 inference_latency_seconds=latencies,anchors=records)
     for task in sorted(set(tasks)):
         selected=np.asarray(tasks)==task

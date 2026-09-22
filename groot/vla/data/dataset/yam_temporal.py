@@ -1,40 +1,83 @@
-"""The fixed four-block ABC/YAM temporal contract, without model dependencies."""
-from dataclasses import dataclass
+"""ABC temporal contracts shared by preparation, statistics, loading and evaluation."""
+from dataclasses import asdict, dataclass
 import numpy as np
 
-BLOCK_LENGTH = 24
-NUM_BLOCKS = 4
-ENDPOINT = BLOCK_LENGTH * NUM_BLOCKS
+
+@dataclass(frozen=True)
+class TemporalConfig:
+    block_length: int = 24
+    video_stride: int = 3
+    num_blocks: int = 4
+    action_rate: int = 30
+    num_frame_per_block: int = 2
+    num_state_per_block: int = 1
+    num_frames: int = 33
+
+    def __post_init__(self):
+        if (self.block_length, self.video_stride) not in ((24, 3), (48, 6)):
+            raise ValueError("ABC supports H24/stride3 or H48/stride6")
+        if (self.num_blocks, self.action_rate, self.num_frame_per_block,
+                self.num_state_per_block, self.num_frames) != (4, 30, 2, 1, 33):
+            raise ValueError("ABC requires 30 Hz actions, K2/M4, one state per chunk and 33 frames")
+
+    @classmethod
+    def from_name(cls, name):
+        if name not in ("h24", "h48"):
+            raise ValueError(f"Unknown ABC temporal preset: {name}")
+        return cls(block_length=int(name[1:]), video_stride=3 if name == "h24" else 6)
+
+    @classmethod
+    def from_manifest(cls, manifest):
+        # Original version-1 artifacts predate temporal metadata and are H24 only.
+        return cls(**manifest["temporal"]) if "temporal" in manifest else cls()
+
+    @property
+    def endpoint(self):
+        return self.block_length * self.num_blocks
+
+    @property
+    def name(self):
+        return f"h{self.block_length}"
+
+    @property
+    def video_fps(self):
+        return self.action_rate / self.video_stride
+
+    def to_dict(self):
+        return asdict(self)
 
 
 @dataclass(frozen=True)
 class YAMTemporalPlan:
     start: int
+    temporal: TemporalConfig = TemporalConfig()
 
     @property
     def state_indices(self):
-        return self.start + np.arange(0, ENDPOINT, BLOCK_LENGTH)
+        return self.start + np.arange(0, self.temporal.endpoint, self.temporal.block_length)
 
     @property
     def action_indices(self):
-        return self.start + np.arange(ENDPOINT)
+        return self.start + np.arange(self.temporal.endpoint)
 
     @property
     def video_indices(self):
-        return self.start + np.arange(0, ENDPOINT + 1, 3)
+        return self.start + np.arange(0, self.temporal.endpoint + 1, self.temporal.video_stride)
 
     def validate(self, episode_length, task_indices=None):
-        if self.start < 0 or self.start + ENDPOINT >= episode_length:
+        endpoint = self.start + self.temporal.endpoint
+        if self.start < 0 or endpoint >= episode_length:
             raise ValueError("Incomplete four-block window")
         if task_indices is not None:
-            tasks = task_indices[self.start:self.start + ENDPOINT + 1]
-            if np.any(tasks != tasks[0]):
+            tasks = task_indices[self.start:endpoint + 1]
+            if len(tasks) != self.temporal.endpoint + 1 or np.any(tasks != tasks[0]):
                 raise ValueError("Window crosses a task boundary")
         return self
 
     def relative_actions(self, state, action):
-        targets = action[self.action_indices].reshape(NUM_BLOCKS, BLOCK_LENGTH, -1)
-        return (targets - state[self.state_indices, None, :]).reshape(ENDPOINT, -1)
+        t = self.temporal
+        targets = action[self.action_indices].reshape(t.num_blocks, t.block_length, -1)
+        return (targets - state[self.state_indices, None, :]).reshape(t.endpoint, -1)
 
 
 class WindowRanges:
