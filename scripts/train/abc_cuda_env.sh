@@ -16,4 +16,15 @@ export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${SLURM_TMPDIR:-/tmp}/dream
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${TORCH_EXTENSIONS_DIR}/triton}"
 export MAX_JOBS="${MAX_JOBS:-4}"
 mkdir -p "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}"
+# PyTorch's CUDA wheel supplies cuRAND, while the local compiler-only toolkit
+# does not. CPUAdam links with -lcurand, which requires an unversioned name.
+ABC_CURAND_LIB="$(python -c 'import sysconfig; from pathlib import Path; print(Path(sysconfig.get_path("purelib"))/"nvidia/curand/lib/libcurand.so.10")')"
+if [[ -f "${ABC_CURAND_LIB}" ]]; then
+  mkdir -p "${TORCH_EXTENSIONS_DIR}/cuda-libs"
+  ln -sfn "${ABC_CURAND_LIB}" "${TORCH_EXTENSIONS_DIR}/cuda-libs/libcurand.so"
+  ln -sfn "${ABC_CURAND_LIB}" "${TORCH_EXTENSIONS_DIR}/cuda-libs/libcurand.so.10"
+  export LIBRARY_PATH="${TORCH_EXTENSIONS_DIR}/cuda-libs${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+  export LD_LIBRARY_PATH="${TORCH_EXTENSIONS_DIR}/cuda-libs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+unset ABC_CURAND_LIB
 unset ABC_REPO_ROOT

@@ -8,7 +8,7 @@ Run submission commands from the repository root. ABC jobs are grouped by purpos
 | `abc/finetune/full/` | General full-finetuning launcher and the 100k-step H200 run |
 | `abc/finetune/lora/` | Reserved for ABC LoRA jobs; no ABC LoRA Slurm recipe exists yet |
 | `abc/benchmarks/` | CUDA and loader checks, smoke/stability runs, and memory/throughput experiments |
-| `abc/eval/` | Held-out policy evaluation |
+| `abc/eval/` | Held-out policy evaluation and [validation video inference](abc/eval/README.md) |
 | `abc/monitor/` | CPU-only job progress and validation monitoring |
 
 ## Common commands

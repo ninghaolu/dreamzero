@@ -3,15 +3,15 @@
 # --dry-run prints the four submissions without submitting jobs.
 set -euo pipefail
 export ABC_TEMPORAL="${ABC_TEMPORAL:-h48}"
-ROOT=/projects/work/yang-lab/projects/policy-finetuning
+ROOT=/home/alex/policy-finetuning
 WORKER="${ROOT}/dreamzero/slurm/abc/stats/compute_abc_yam_dreamzero_stats.bash"
-PYTHON=/scratch/nl2752/miniconda3/envs/dreamzero/bin/python
+PYTHON="${ROOT}/dreamzero/.venv/bin/python"
 SCRIPT="${ROOT}/dreamzero/scripts/data/compute_abc_yam_stats.py"
-export ABC_DZ_STATS_DATASET_ROOT="${ABC_DZ_STATS_DATASET_ROOT:-/projects/work/yang-lab/projects/pretrain_world_model/abc_130k_v3_train}"
+export ABC_DZ_STATS_DATASET_ROOT="${ABC_DZ_STATS_DATASET_ROOT:-/projects/data/datasets/abc_130k_v3_train}"
 export ABC_DZ_STATS_OUTPUT_DIR="${ABC_DZ_STATS_OUTPUT_DIR:-${ROOT}/dreamzero/data/abc/${ABC_TEMPORAL}/norm_stats}"
 export ABC_DZ_STATS_WORK_DIR="${ABC_DZ_STATS_WORK_DIR:-${ROOT}/dreamzero/outputs/abc/${ABC_TEMPORAL}/stats/work}"
 LOG_DIR="${ABC_DZ_STATS_LOG_DIR:-${ROOT}/dreamzero/outputs/abc/${ABC_TEMPORAL}/stats}"
-CONCURRENT="${ABC_DZ_STATS_MAX_CONCURRENT:-32}"
+CONCURRENT="${ABC_DZ_STATS_MAX_CONCURRENT:-128}"
 DRY_RUN=0
 if [[ "${1:-}" == --dry-run ]]; then DRY_RUN=1; shift; fi
 if (( $# )); then echo 'Usage: submit_abc_yam_dreamzero_stats.bash [--dry-run]' >&2; exit 2; fi

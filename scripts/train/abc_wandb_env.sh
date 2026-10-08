@@ -3,7 +3,9 @@
 export WANDB_ENTITY="${WANDB_ENTITY:-oneworld-ai}"
 export WANDB_PROJECT="${WANDB_PROJECT:-policy-finetuning}"
 export WANDB_MODE="${WANDB_MODE:-online}"
-WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-/projects/work/yang-lab/projects/policy-finetuning/yam-abc-reproduce/.secrets/wandb_alex_api_key}"
+ABC_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-${ABC_WORKSPACE}/yam-abc-reproduce/.secrets/wandb_alex_api_key}"
+unset ABC_WORKSPACE
 if [[ -z "${WANDB_API_KEY:-}" && "${WANDB_MODE}" == online ]]; then
   if [[ ! -r "${WANDB_API_KEY_FILE}" ]]; then
     echo "ERROR: W&B API key file is missing or unreadable: ${WANDB_API_KEY_FILE}" >&2

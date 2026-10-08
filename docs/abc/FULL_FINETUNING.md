@@ -1,5 +1,10 @@
 # ABC-130K full finetuning
 
+For `/home/alex/policy-finetuning/dreamzero` on the `defq` H100 cluster, use
+[the H100 cluster guide](H100_CLUSTER.md). It documents the current paths,
+environment, preparation jobs, and eight-H100 launcher. The H200 commands and
+job records below describe the previous cluster.
+
 The ABC launcher defaults to `ABC_TEMPORAL=h48` and `train_architecture=full`.
 The diffusion/action model, including state/action encoders and action decoder,
 is trainable. The text encoder, image encoder, and VAE remain frozen. The previous

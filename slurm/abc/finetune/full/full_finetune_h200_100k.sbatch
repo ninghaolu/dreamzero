@@ -1,34 +1,15 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=dz-abc-h48-full-100k
-#SBATCH --account=torch_pr_147_courant
-#SBATCH --partition=h200_public
+#SBATCH --partition=defq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:h200:8
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=1000G
+#SBATCH --mem=1024G
 #SBATCH --time=2-00:00:00
-#SBATCH --output=/projects/work/yang-lab/projects/policy-finetuning/dreamzero/outputs/abc/h48/stats/full-100k-%j.out
-#SBATCH --error=/projects/work/yang-lab/projects/policy-finetuning/dreamzero/outputs/abc/h48/stats/full-100k-%j.err
+#SBATCH --chdir=/home/alex/policy-finetuning/dreamzero
+#SBATCH --output=/home/alex/policy-finetuning/dreamzero/logs/full-h100-%j.out
+#SBATCH --error=/home/alex/policy-finetuning/dreamzero/logs/full-h100-%j.err
+# Compatibility path; this cluster uses eight H100s.
 set -euo pipefail
-ROOT=/projects/work/yang-lab/projects/policy-finetuning
-source "${ROOT}/envs/dreamzero/activate.sh"
-export ABC_TEMPORAL=h48
-export ABC_METADATA_ROOT="${ROOT}/dreamzero/data/abc/h48/train"
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-export NUM_GPUS="${SLURM_GPUS_ON_NODE:-8}"
-export MAX_STEPS=100000 SAVE_STEPS=1000 NUM_WORKERS=2 BATCH_SIZE=1 GRADIENT_ACCUMULATION_STEPS=1
-# Reuse OUTPUT_DIR to resume an interrupted run from its saved checkpoint.
-export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/dreamzero/outputs/abc/h48/full_100k_${SLURM_JOB_ID}}"
-nvidia-smi
-mkdir -p "${OUTPUT_DIR}"
-nvidia-smi --query-gpu=timestamp,index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw \
-  --format=csv --loop=5 > "${OUTPUT_DIR}/gpu_utilization.csv" 2> "${OUTPUT_DIR}/gpu_utilization.err" &
-gpu_sampler_pid=$!
-cleanup_sampler() {
-  kill "${gpu_sampler_pid}" 2>/dev/null || true
-  wait "${gpu_sampler_pid}" 2>/dev/null || true
-}
-trap cleanup_sampler EXIT
-bash scripts/train/abc_yam_v3_training.sh global_batch_size=8 training_args.logging_steps=10 "$@"
-python scripts/train/validate_abc_yam_run.py "${OUTPUT_DIR}" --steps 100000 --ranks "${NUM_GPUS}"
+exec bash "${DREAMZERO_REPO_ROOT:-/home/alex/policy-finetuning/dreamzero}/slurm/abc/finetune/full/full_finetune_h100_100k.sbatch" "$@"
